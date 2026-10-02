@@ -1473,6 +1473,16 @@ local function IsCustomAssetIcon(Icon: string, IncludeAssetId: boolean)
     return typeof(Icon) == "string" and (Icon:match("^content://") or (Icon:match("^rbxasset://%x+/") or Icon:match("^rbxasset://[^/]+/")) or (IncludeAssetId == true and Icon:match("^rbxassetid://")))
 end
 
+local function GetBgAssetUrl(Image)
+    local Id = typeof(Image) == "number" and Image or (typeof(Image) == "string" and (tonumber(Image) or Image:match("^rbxassetid://(%d+)")))
+
+    if not Id then
+        return Image
+    end
+
+    return "rbxthumb://type=Asset&id=" .. Id .. "&w=420&h=420"
+end
+
 type Icon = {
     Url: string,
     Id: number,
@@ -10962,7 +10972,7 @@ function Library:CreateWindow(WindowInfo)
             ZIndex = 2
         })
 
-        local BackgroundIcon = Library:GetCustomIcon(WindowInfo.BackgroundImage)
+        local BackgroundIcon = Library:GetCustomIcon(GetBgAssetUrl(WindowInfo.BackgroundImage))
         HasBackgroundImage = BackgroundIcon ~= nil
         BackgroundImage = New("ImageLabel", {
             Active = false,
@@ -11354,8 +11364,9 @@ function Library:CreateWindow(WindowInfo)
         WindowInfo.Title = title
     end
 
-    function Window:SetBackgroundImage(Image: string)
+    function Window:SetBackgroundImage(Image: string | number)
         local ValidIcon = false
+        Image = GetBgAssetUrl(Image)
 
         if typeof(Image) == "string" then
             local BackgroundIcon = Library:GetCustomIcon(Image)
