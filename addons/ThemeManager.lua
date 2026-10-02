@@ -662,7 +662,7 @@ function ThemeManager:ApplyThemeData(ThemeData: any): (boolean, string?)
             ThemeManager.Library:SetFont(Enum.Font[Value])
 
         elseif Index == "BackgroundImage" then
-            if typeof(Value) ~= "string" then continue end
+            if typeof(Value) ~= "string" or Value == "" then continue end
             ThemeManager.Library:SetBackgroundImage(Value)
 
         elseif table.find(SchemeIndexes, Index) then
@@ -828,7 +828,7 @@ function ThemeManager:CreateThemeManager(Themesbox: any)
     Themesbox:AddInput("BackgroundImage", { 
         Text = "Background Image",
 
-        Default = "",
+        Default = ThemeManager.Library.Scheme.BackgroundImage or "",
         Finished = true,
         ClearTextOnFocus = false,
         ClearTextOnBlur = false

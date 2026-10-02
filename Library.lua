@@ -1474,13 +1474,32 @@ local function IsCustomAssetIcon(Icon: string, IncludeAssetId: boolean)
 end
 
 local function GetBgAssetUrl(Image)
-    local Id = typeof(Image) == "number" and Image or (typeof(Image) == "string" and (tonumber(Image) or Image:match("^rbxassetid://(%d+)")))
+    if typeof(Image) == "string" then
+        Image = Image:match("^%s*(.-)%s*$")
+    end
+
+    local Id = typeof(Image) == "number" and Image or (typeof(Image) == "string" and (tonumber(Image) or Image:match("^rbxassetid://(%d+)") or Image:match("[?&]id=(%d+)")))
 
     if not Id then
         return Image
     end
 
     return "rbxthumb://type=Asset&id=" .. Id .. "&w=420&h=420"
+end
+
+local BackgroundImagePath = "Obsidian/background_image.txt"
+
+local function SaveBackgroundImage(Image)
+    if type(writefile) ~= "function" then return end
+    if type(makefolder) == "function" then pcall(makefolder, "Obsidian") end
+    pcall(writefile, BackgroundImagePath, typeof(Image) == "string" and Image or tostring(Image))
+end
+
+local function LoadBackgroundImage()
+    if type(readfile) ~= "function" then return "" end
+    local ok, data = pcall(readfile, BackgroundImagePath)
+    if not ok or typeof(data) ~= "string" then return "" end
+    return data:match("^%s*(.-)%s*$") or ""
 end
 
 type Icon = {
@@ -7687,15 +7706,11 @@ do
 
         if Input.Finished then
             table.insert(Input.Connections, Box.FocusLost:Connect(function(Enter)
-                if not Enter then
-                    if Input.ClearTextOnBlur then
-                        Box.Text = Input.Value
-                    end
-
-                    return
+                if Enter or Box.Text ~= Input.Value then
+                    Input:SetValue(Box.Text)
+                elseif Input.ClearTextOnBlur then
+                    Box.Text = Input.Value
                 end
-
-                Input:SetValue(Box.Text)
             end))
         else
             table.insert(Input.Connections, Box:GetPropertyChangedSignal("Text"):Connect(function()
@@ -10972,6 +10987,15 @@ function Library:CreateWindow(WindowInfo)
             ZIndex = 2
         })
 
+        if WindowInfo.BackgroundImage == "" then
+            local SavedBackgroundImage = LoadBackgroundImage()
+
+            if SavedBackgroundImage ~= "" then
+                WindowInfo.BackgroundImage = SavedBackgroundImage
+                Library.Scheme.BackgroundImage = SavedBackgroundImage
+            end
+        end
+
         local BackgroundIcon = Library:GetCustomIcon(GetBgAssetUrl(WindowInfo.BackgroundImage))
         HasBackgroundImage = BackgroundIcon ~= nil
         BackgroundImage = New("ImageLabel", {
@@ -11366,6 +11390,7 @@ function Library:CreateWindow(WindowInfo)
 
     function Window:SetBackgroundImage(Image: string | number)
         local ValidIcon = false
+        local RawImage = Image
         Image = GetBgAssetUrl(Image)
 
         if typeof(Image) == "string" then
@@ -11419,6 +11444,7 @@ function Library:CreateWindow(WindowInfo)
 
         HasBackgroundImage = ValidIcon
         WindowInfo.BackgroundImage = Image
+        SaveBackgroundImage(RawImage)
     end
 
     function Window:SetFooter(Footer: string)
