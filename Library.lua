@@ -20,6 +20,259 @@ local gethui = gethui or function()
     return CoreGui
 end
 
+--// Supersede \\--
+local PrevLibrary = getgenv().Library
+if type(PrevLibrary) == "table" and not PrevLibrary.Unloaded
+    and type(PrevLibrary.Unload) == "function"
+    and type(PrevLibrary.OnUnload) == "function"
+    and type(PrevLibrary.Signals) == "table" then
+    pcall(PrevLibrary.Unload, PrevLibrary)
+end
+
+local function WeakMap()
+    return setmetatable({}, { __mode = "k" })
+end
+
+local Track = getgenv().__obsidian_track__
+if type(Track) ~= "table" then
+    Track = {
+        installed = false,
+        hooks = {},
+        owners = WeakMap(),
+        pending = {},
+        pn = 0,
+        trackers = {},
+    }
+    getgenv().__obsidian_track__ = Track
+end
+
+local Trk = {
+    conns = WeakMap(),
+    threads = WeakMap(),
+    insts = WeakMap(),
+}
+
+local function PushPending(Kind, Obj, Ref)
+    local Slot = (Track.pn % 512) + 1
+    Track.pn += 1
+    Track.pending[Slot] = { Kind, Obj, Ref }
+end
+
+local function RecordThread(Owner, Thread, Co)
+    if Owner then
+        Owner.threads[Thread] = true
+    elseif type(Thread) == "thread" then
+        PushPending("thread", Thread, Co)
+    end
+end
+
+local function WrapThread(Owner, Fn)
+    if not Owner or type(Fn) ~= "function" then
+        return Fn
+    end
+
+    return function(...)
+        local Co = coroutine.running()
+        Track.owners[Co] = Owner
+        Owner.threads[Co] = true
+        return Fn(...)
+    end
+end
+
+local function Claim(Owner)
+    local Pending = Track.pending
+    local Count = math.min(Track.pn, 512)
+    local Moved = true
+
+    while Moved do
+        Moved = false
+
+        for Index = 1, Count do
+            local Entry = Pending[Index]
+            if Entry and Track.owners[Entry[3]] == Owner then
+                if Entry[1] == "thread" then
+                    if not Track.owners[Entry[2]] then
+                        Track.owners[Entry[2]] = Owner
+                        Owner.threads[Entry[2]] = true
+                        Moved = true
+                    end
+                elseif Entry[1] == "conn" then
+                    Owner.conns[Entry[2]] = true
+                    Moved = true
+                else
+                    Owner.insts[Entry[2]] = true
+                    Moved = true
+                end
+
+                Pending[Index] = nil
+            end
+        end
+    end
+end
+
+local function Install()
+    if Track.installed then
+        return
+    end
+
+    local Hooks = Track.hooks
+    local Success = false
+
+    local OldIndex
+    if pcall(function()
+        OldIndex = hookmetamethod(RunService.Heartbeat, "__index", function(Self, Key)
+            local Value = OldIndex(Self, Key)
+            if Key ~= "Connect" and Key ~= "Once" then
+                return Value
+            end
+
+            return function(Signal, Callback, ...)
+                local Co = coroutine.running()
+                local Owner = Track.owners[Co]
+                local Fn = Callback
+
+                if Owner and type(Callback) == "function" then
+                    Fn = function(...)
+                        local ChildCo = coroutine.running()
+                        local Prev = Track.owners[ChildCo]
+                        Track.owners[ChildCo] = Owner
+                        local Results = table.pack(Callback(...))
+                        Track.owners[ChildCo] = Prev
+                        return table.unpack(Results, 1, Results.n)
+                    end
+                end
+
+                local Conn = Value(Signal, Fn, ...)
+                if typeof(Conn) ~= "RBXScriptConnection" then
+                    return Conn
+                end
+
+                if Owner then
+                    Owner.conns[Conn] = true
+                else
+                    PushPending("conn", Conn, Co)
+                end
+                return Conn
+            end
+        end)
+    end) and type(OldIndex) == "function" then
+        Hooks[#Hooks + 1] = { Meta = true, Target = RunService.Heartbeat, Name = "__index", Prev = OldIndex }
+        Success = true
+    end
+
+    local function HookFn(Target, Make)
+        local Prev
+        local Hook = Make(function(...)
+            return Prev(...)
+        end)
+        local Ok, Result = pcall(hookfunction, Target, Hook)
+        if Ok and type(Result) == "function" then
+            Prev = Result
+            Hooks[#Hooks + 1] = { Target = Target, Prev = Prev }
+            Success = true
+        end
+    end
+
+    HookFn(task.spawn, function(CallPrev)
+        return function(Fn, ...)
+            local Co = coroutine.running()
+            local Owner = Track.owners[Co]
+            local Thread = CallPrev(WrapThread(Owner, Fn), ...)
+            RecordThread(Owner, Thread, Co)
+            return Thread
+        end
+    end)
+
+    HookFn(task.defer, function(CallPrev)
+        return function(Fn, ...)
+            local Co = coroutine.running()
+            local Owner = Track.owners[Co]
+            local Thread = CallPrev(WrapThread(Owner, Fn), ...)
+            RecordThread(Owner, Thread, Co)
+            return Thread
+        end
+    end)
+
+    HookFn(task.delay, function(CallPrev)
+        return function(Delay, Fn, ...)
+            local Co = coroutine.running()
+            local Owner = Track.owners[Co]
+            local Thread = CallPrev(Delay, WrapThread(Owner, Fn), ...)
+            RecordThread(Owner, Thread, Co)
+            return Thread
+        end
+    end)
+
+    HookFn(coroutine.create, function(CallPrev)
+        return function(Fn)
+            local Thread = CallPrev(Fn)
+            local Co = coroutine.running()
+            RecordThread(Track.owners[Co], Thread, Co)
+            return Thread
+        end
+    end)
+
+    HookFn(coroutine.resume, function(CallPrev)
+        return function(Thread, ...)
+            local Co = coroutine.running()
+            local Owner = Track.owners[Co]
+            if Owner and type(Thread) == "thread" and not Track.owners[Thread] then
+                Track.owners[Thread] = Owner
+                Owner.threads[Thread] = true
+            end
+            return CallPrev(Thread, ...)
+        end
+    end)
+
+    HookFn(coroutine.wrap, function(CallPrev)
+        return function(Fn, ...)
+            local Owner = Track.owners[coroutine.running()]
+            return CallPrev(WrapThread(Owner, Fn), ...)
+        end
+    end)
+
+    HookFn(Instance.new, function(CallPrev)
+        return function(ClassName, Parent)
+            local Inst = CallPrev(ClassName, Parent)
+            local Co = coroutine.running()
+            local Owner = Track.owners[Co]
+            if Owner then
+                Owner.insts[Inst] = true
+            else
+                PushPending("inst", Inst, Co)
+            end
+            return Inst
+        end
+    end)
+
+    Track.installed = Success
+    if not Success then
+        table.clear(Hooks)
+    end
+end
+
+local function Uninstall()
+    for Index = #Track.hooks, 1, -1 do
+        local Hook = Track.hooks[Index]
+        if Hook.Meta then
+            pcall(hookmetamethod, Hook.Target, Hook.Name, Hook.Prev)
+        else
+            pcall(hookfunction, Hook.Target, Hook.Prev)
+        end
+    end
+
+    table.clear(Track.hooks)
+    Track.installed = false
+end
+
+Install()
+
+local MainThread = coroutine.running()
+Track.owners[MainThread] = Trk
+Trk.threads[MainThread] = true
+Track.trackers[Trk] = true
+Claim(Trk)
+
 local LocalPlayer = Players.LocalPlayer or Players.PlayerAdded:Wait()
 local Mouse = cloneref(LocalPlayer:GetMouse())
 
@@ -14945,7 +15198,23 @@ Library:GiveSignal(Teams.ChildAdded:Connect(OnTeamChange))
 Library:GiveSignal(Teams.ChildRemoved:Connect(OnTeamChange))
 
 function Library:Unload()
+    if Library.Unloaded then
+        return
+    end
     Library.Unloaded = true
+
+    local Co = coroutine.running()
+    if Track.owners[Co] == nil then
+        Track.owners[Co] = Trk
+    end
+
+    local function DisconnectAll()
+        for Connection in pairs(Trk.conns) do
+            if Connection.Connected then
+                pcall(Connection.Disconnect, Connection)
+            end
+        end
+    end
 
     --// Disconnect connections
     for Index = #Library.Signals, 1, -1 do
@@ -14956,6 +15225,8 @@ function Library:Unload()
         end
     end
 
+    DisconnectAll()
+
     --// Run Unload Callbacks
     for _ = 1, #Library.UnloadSignals do
         local Callback = table.remove(Library.UnloadSignals, 1)
@@ -14964,6 +15235,8 @@ function Library:Unload()
             Library:SafeCallback(Callback)
         end
     end
+
+    DisconnectAll()
 
     --// Destroy elements
     for Index = #Library.Tabs, 1, -1 do
@@ -14988,6 +15261,22 @@ function Library:Unload()
 
     if ScreenGui then
         ScreenGui:Destroy()
+    end
+
+    --// Cancel script threads
+    for Thread in pairs(Trk.threads) do
+        if Thread ~= Co then
+            if not pcall(task.cancel, Thread) then
+                pcall(coroutine.close, Thread)
+            end
+        end
+    end
+
+    DisconnectAll()
+
+    --// Destroy script instances
+    for Inst in pairs(Trk.insts) do
+        pcall(Inst.Destroy, Inst)
     end
 
     --// Clear tables
@@ -15017,6 +15306,26 @@ function Library:Unload()
 
     table.clear(TransparencyCache)
     table.clear(ActiveTabTweens)
+
+    for Thread in pairs(Trk.threads) do
+        if Track.owners[Thread] == Trk then
+            Track.owners[Thread] = nil
+        end
+    end
+
+    Track.trackers[Trk] = nil
+    if Track.owners[Co] == Trk then
+        Track.owners[Co] = nil
+    end
+
+    if not next(Track.trackers) then
+        Uninstall()
+        getgenv().__obsidian_track__ = nil
+    end
+
+    table.clear(Trk.conns)
+    table.clear(Trk.threads)
+    table.clear(Trk.insts)
 
     Library.Toggle = function(...) end
     Library.ScreenGui = nil
